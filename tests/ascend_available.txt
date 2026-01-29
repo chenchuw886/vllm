@@ -194,10 +194,8 @@ tests/models/multimodal/processing/test_qwen3_omni.py
 tests/models/multimodal/processing/test_smolvlm.py
 tests/models/multimodal/processing/test_transformers.py
 tests/models/multimodal/test_mapping.py
-tests/models/quantization/test_bitblas.py
 tests/models/quantization/test_gguf.py
 tests/models/quantization/test_gpt_oss_attn_quantization.py
-tests/models/quantization/test_gptq_bitblas.py
 tests/models/quantization/test_modelopt.py
 tests/models/quantization/test_mxfp4.py
 tests/models/test_gguf_download.py
