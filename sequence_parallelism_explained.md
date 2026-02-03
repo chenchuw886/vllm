@@ -18,6 +18,21 @@ Sequence Parallelism 的改进：
 
 ## 二、实现原理
 
+### ⚠️ 重要前提说明
+
+**Sequence Parallelism 只替换通信模式，不改变计算逻辑！**
+
+- ✅ SP 只作用于 **RMSNorm 层**（element-wise 操作）
+- ✅ 通过编译时 Pattern Matching 自动替换 `AllReduce → RMSNorm` 模式
+- ❌ MLP/Attention 的计算与标准 TP **完全相同**
+- ❌ 不需要修改模型代码，自动识别和替换
+
+vLLM 支持的 4 种 Pattern（来自 `sequence_parallelism.py`）：
+1. `FirstAllReduceRMSNormPattern` - 第一个 RMSNorm
+2. `MiddleAllReduceRMSNormPattern` - 中间 RMSNorm (with residual)
+3. `FirstAllReduceRMSNormStaticFP8Pattern` - FP8 量化的第一个 RMSNorm
+4. `MiddleAllReduceRMSNormStaticFP8Pattern` - FP8 量化的中间 RMSNorm
+
 ### 1. 图变换（Graph Transformation）
 
 vLLM 通过编译时的图变换（Compilation Pass）来实现 Sequence Parallelism：
@@ -102,7 +117,8 @@ Sequence Parallelism **不会破坏 Transformer 层间的信息流动**，因为
    
 2. **Attention 仍然是全局的**
    - Attention 计算（QKV projection + attention + output projection）**仍然看到完整的序列**
-   - Sequence Parallel 只作用于 MLP 和 normalization 层
+   - Sequence Parallel **只作用于 Normalization 层**（RMSNorm/LayerNorm）
+   - **重要**: MLP 层的计算与标准 TP 完全相同，SP 只改变 MLP 后的通信模式
 
 ### 关键机制 2: 完整的数据流
 
@@ -128,16 +144,18 @@ Sequence Parallelism **不会破坏 Transformer 层间的信息流动**，因为
    RMSNorm (本地计算):
      - 每个 rank 独立对自己的 token chunk 做 normalization
    
-3. MLP (继续 Sequence Parallel):
-   MLP input: [部分序列] on each rank
-   - Gate/Up projection (ColumnParallel)
+3. MLP (接收部分序列，但计算方式与标准TP相同):
+   MLP input: [部分序列] on each rank (由上一步ReduceScatter提供)
+   - Gate/Up projection (ColumnParallel) - 与标准TP相同
    - Activation
-   - Down projection (RowParallel)
-   Output: [部分序列的部分维度] on each rank
+   - Down projection (RowParallel) - 与标准TP相同
+   Output: [部分序列] on each rank (RowParallel输出是完整hidden_size但序列维度是部分)
 
-4. 恢复完整序列:
-   AllGather(mlp_output):
-     Output: [完整序列] ← 所有 ranks 重新拥有完整序列
+4. 恢复完整序列 (通过下一个 ReduceScatter → RMSNorm → AllGather):
+   - MLP 的 RowParallel 输出：[部分序列, hidden_size] on each rank
+   - ReduceScatter：聚合 TP ranks 的输出 + 保持序列维度切分
+   - RMSNorm：对部分序列做 normalization
+   - AllGather：[完整序列] ← 所有 ranks 重新拥有完整序列
      
 下一层输入: [完整序列] on all ranks (与 Layer L 输入相同状态)
 ```

@@ -25,21 +25,78 @@
 | **Attention 层** | TP only | Q, K, V | `[hidden, heads*head_dim]` | ColumnParallel | `[hidden, heads*head_dim/tp]` | None | None | Q/K/V 按 head 切分 |
 | | | O (output) | `[heads*head_dim, hidden]` | RowParallel | `[heads*head_dim/tp, hidden]` | None | All-Reduce | 输出投影 |
 | | DP + TP | 同上 | 同上 | 同上 | 同上 | None | All-Reduce | DP 间独立,TP 内通信 |
-| **MoE Expert 层** | TP only (无 EP) | w1 (gate_proj) | `[E, hidden, inter]` | ColumnParallel | `[E, hidden, inter/tp]` | None | None | 门控投影 |
-| | | w3 (up_proj) | `[E, hidden, inter]` | ColumnParallel | `[E, hidden, inter/tp]` | None | None | 上投影 |
-| | | w2 (down_proj) | `[E, inter, hidden]` | RowParallel | `[E, inter/tp, hidden]` | None | All-Reduce | 下投影 |
+| **MoE Expert 层** | TP only (无 EP) | **gate (router)** | `[hidden, num_experts]` | **Replicate** | `[hidden, num_experts]` (每个rank相同) | None | None | **Router层，不切分**！完整复制。必须让所有rank得到相同的router logits，才能正确计算top-k。注意：router ≠ w1 |
+| | | **w1 (gate_proj)** | `[num_experts, hidden, inter]` | ColumnParallel | `[num_experts, hidden, inter/tp]` | None | None | **Expert参数**，门控投影。注意：w1 ≠ router |
+| | | w3 (up_proj) | `[num_experts, hidden, inter]` | ColumnParallel | `[num_experts, hidden, inter/tp]` | None | None | Expert参数，上投影 |
+| | | w2 (down_proj) | `[num_experts, inter, hidden]` | RowParallel | `[num_experts, inter/tp, hidden]` | None | All-Reduce | 下投影 |
 | | | - | - | - | - | - | `tp_size > 1` | 在 expert 计算后执行 |
-| | EP + TP | w1 (gate_proj) | `[E, hidden, inter]` | **先 EP 分专家**<br>**再 TP 切参数** | `[E/ep, hidden, inter/tp]` | **All-to-All**<br>(token routing) | None | 每个 rank 只持有<br>`E/ep` 个完整专家 |
-| | | w3 (up_proj) | `[E, hidden, inter]` | 同上 | `[E/ep, hidden, inter/tp]` | All-to-All | None | 同上 |
+| | EP + TP | gate_proj (router) | `[hidden, num_experts]` | **Replicate** | `[hidden, num_experts]` (每个rank相同) | None | None | **不切分**，全局 top-k 必须一致 |
+| | | w1/w3 | `[E, hidden, inter]` | **先 EP 分专家**<br>**再 TP 切参数** | `[E/ep, hidden, inter/tp]` | **All-to-All**<br>(token routing) | None | 每个 rank 只持有<br>`E/ep` 个完整专家 |
 | | | w2 (down_proj) | `[E, inter, hidden]` | 先 EP 再 TP | `[E/ep, inter/tp, hidden]` | All-to-All | **All-Reduce** +<br>**All-to-All** | All-Reduce (TP)<br>All-to-All (EP routing back) |
 | | DP + TP | w1/w3/w2 | 同 TP only | 同 TP only | 同 TP only | None | All-Reduce | DP 组间独立<br>不额外通信 |
-| | **DP + EP (无 TP)** | w1 (gate_proj) | `[E, hidden, inter]` | **仅 EP 分专家** | `[E/ep, hidden, inter]` | **All-to-All** | **All-to-All** | 每个 rank 持有<br>`E/ep` 个**完整**专家 |
-| | | w3 (up_proj) | `[E, hidden, inter]` | 仅 EP | `[E/ep, hidden, inter]` | All-to-All | All-to-All | 权重**不切分**<br>(TP=1) |
+| | **DP + EP (无 TP)** | gate_proj (router) | `[hidden, num_experts]` | **Replicate** | `[hidden, num_experts]` (每个rank相同) | None | None | **不切分**，所有 rank 执行相同 top-k |
+| | | w1/w3 | `[E, hidden, inter]` | **仅 EP 分专家** | `[E/ep, hidden, inter]` | **All-to-All** | **All-to-All** | 每个 rank 持有<br>`E/ep` 个**完整**专家 |
 | | | w2 (down_proj) | `[E, inter, hidden]` | 仅 EP | `[E/ep, inter, hidden]` | All-to-All | All-to-All | **无 All-Reduce**<br>(因为无 TP) |
 | | DP + EP + TP | w1/w3/w2 | 同上 | EP + TP 组合 | `[E/ep, *, */tp]` | All-to-All (EP) | All-Reduce (TP) +<br>All-to-All (EP) | DP 组独立划分专家 |
 | | **Sequence Parallel** | w1/w3/w2 | 同 TP | 同 TP | 同 TP | **ReduceScatter** | **All-Gather** | Sequence 维度切分<br>替代 All-Reduce |
 
 ## 三、具体实现代码分析
+
+### 0. Router (Gate) Projection 特殊性
+
+**问题**: 为什么 gate_proj 不能被 TP 切分？
+
+**答案**: Gate projection 计算的是 router logits，必须基于**完整的 expert 集合**来决定 top-k 专家，否则无法得到全局最优的路由决策。
+
+```python
+# ❌ 错误做法：gate_proj 被 ColumnParallel 切分
+gate_weight: [hidden_size, num_experts] 
+    → ColumnParallel 切分
+    → rank 0 持有: [hidden_size, num_experts/2]
+    → rank 1 持有: [hidden_size, num_experts/2]
+
+router_logits = x @ gate_weight  
+# rank 0 得到: [batch, seq, num_experts/2] - 只有前一半 experts 的分数
+# rank 1 得到: [batch, seq, num_experts/2] - 只有后一半 experts 的分数
+
+top_k = torch.topk(router_logits, k=2)
+# ❌ 问题：各 rank 基于不同的 experts 子集计算 top-k
+#         rank 0 的 top-2 可能是 E0, E1（来自前半部分）
+#         rank 1 的 top-2 可能是 E128, E129（来自后半部分）
+#         不同 rank 的路由决策完全不一致！
+```
+
+**正确做法**: Gate projection 使用 **Replicate** 策略
+
+```python
+# ✓ 正确做法：gate_proj 完整复制到所有 TP ranks
+gate_weight: [hidden_size, num_experts] (完整)
+    → Replicate (不切分)
+    → rank 0 持有: [hidden_size, num_experts]
+    → rank 1 持有: [hidden_size, num_experts]
+
+router_logits = x @ gate_weight  
+# 所有 ranks 都得到: [batch, seq, num_experts] (相同的完整 logits)
+
+top_k = torch.topk(router_logits, k=2)
+# ✓ 所有 ranks 计算出相同的 top-k 决策
+#   例如都选择 E5 和 E127
+```
+
+**为什么是 Replicate 而不是其他方式？**
+
+| 方式 | 存储 | 通信 | 能否计算正确的 top-k | 说明 |
+|------|------|------|-------------------|------|
+| **Replicate** | 每个 rank 存储完整权重 | 无 | ✓ 是 | 简单，无通信开销 |
+| **ColumnParallel + All-Reduce** | 权重切分 | 前置 All-Reduce | ❌ 否 | All-Reduce 是求和，不是聚合 logits |
+| **ColumnParallel + All-Gather** | 权重切分 | 前置 All-Gather | ✓ 是 | 可行但多余，直接 Replicate 更优 |
+
+**vLLM 实现**: 实际上在 Mixtral, Qwen2-MoE 等的实现中，gate projection 通常是：
+```python
+self.gate = nn.Linear(hidden_size, num_experts)  
+# Linear 层默认不被 TP 切分
+# 或显式设置为 Replicate
+```
 
 ### 1. 标准 MoE 实现 (Mixtral, Qwen2-MoE 等)
 
