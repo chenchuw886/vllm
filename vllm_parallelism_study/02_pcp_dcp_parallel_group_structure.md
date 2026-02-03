@@ -359,30 +359,30 @@ def get_tp_group_members(rank, world_size, dp_size, pp_size, pcp_size, tp_size):
 | 维度 | 通信类型 | 频率 | 数据量 | 用途 |
 |------|--------|------|--------|------|
 | **TP** | All-Reduce | 每层 | hidden_size | 权重聚合 |
-| **PCP** | All-Gather + ReduceScatter | 每层 Prefill | hidden_size | KV 缓存分散 |
-| **DCP** | All-Gather + ReduceScatter | 每层 Decode | hidden_size | KV 缓存分散 |
+| **PCP** | K/V gather 或 ring send/recv | 每层 Prefill | token chunk 的 K/V | 降低 TTFT |
+| **DCP** | 跨分片 KV 访问通信 | 每层 Decode | KV cache (按 T 分片) | 降低 KV 重复 |
 | **PP** | Send/Recv | 阶段间 | batch_size×seq_len×hidden_size | 激活传递 |
 | **DP** | All-Reduce | backward | 梯度 | 梯度聚合 |
 | **EP** | All-to-All | MoE 层 | tokens×inter_size | 专家路由 |
 
 ### 预填充（Prefill）的通信流：
 ```
-Input → Attention(PCP All-Gather + ReduceScatter) 
-      → MLP(TP All-Reduce) 
-      → LayerNorm 
-      → Output
+Input → Attention(PCP: token chunk 并行) 
+    → MLP(TP All-Reduce) 
+    → LayerNorm 
+    → Output
 
-通信组：PCP → TP
+通信组：PCP（K/V gather 或 ring send/recv） → TP
 ```
 
 ### 解码（Decode）的通信流：
 ```
-Token → Attention(DCP All-Gather + ReduceScatter) 
-      → MLP(TP All-Reduce) 
-      → LayerNorm 
-      → Next Token
+Token → Attention(DCP: KV cache 按 T 分片访问) 
+    → MLP(TP All-Reduce) 
+    → LayerNorm 
+    → Next Token
 
-通信组：DCP → TP
+通信组：DCP（跨分片 KV 访问通信） → TP
 ```
 
 ---

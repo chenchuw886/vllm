@@ -49,10 +49,21 @@
   - 通信流向和拓扑图
   - 实际配置建议
 
+### 第四部分：通信优化与硬件拓扑 - 新增
+- **[03_communication_and_topology_optimization.md](03_communication_and_topology_optimization.md)** ✨⚡
+  - **通信量精确估算**（TP、PP、DP、EP、PCP、DCP）
+  - **单层总通信量分析**（Prefill vs Decode）
+  - **硬件拓扑设计**（单节点、多节点、超节点、HPC 集群）
+  - **DCP 使用策略**（何时启用、如何选择 dcp_size）
+  - **性能预测与优化**（Roofline 模型、瓶颈识别）
+  - **配置决策树**（根据集群拓扑快速选择配置）
+  - **实际案例分析**（DeepSeek-R1、Qwen3、长序列）
+  - **推理/训练配置表**（快速参考）
+
 ### 总结与核心发现
 - **[SUMMARY.md](SUMMARY.md)** ✨ 📌
   - ✅ 任务完成状态总览
-  - 🎯 4 大关键发现汇总
+  - 🎯 关键发现汇总（已按官方逻辑更新）
   - 📊 完整架构对比表（通信模式、频率、开销）
   - 💡 为什么 vLLM 支持 3 种"切分"（TP、SP、CP）
   - 🚀 下一步学习方向建议
@@ -70,28 +81,41 @@
    - 了解为什么需要 Context Parallel
    - 理解 PCP 和 DCP 的区别
 
+3. 快速看 `03_communication_and_topology_optimization.md` 的"硬件拓扑"部分
+   - 了解自己集群的拓扑特征
+   - 查看推荐配置表
+
 ### 中级：深入各种并行策略
-3. 完整阅读 `moe_sharding_communication_table.md`
+4. 完整阅读 `moe_sharding_communication_table.md`
    - 掌握 MoE 各配置下的权重分布
    - 理解 All-to-All 通信的 2 次调用
 
-4. 阅读 `sequence_parallelism_explained.md`
+5. 阅读 `sequence_parallelism_explained.md`
    - 理解 SP 的图变换实现
    - 掌握前后文一致性的 3 个机制
 
-5. 阅读 `01_pcp_dcp_detailed_analysis.md` 完整内容
+6. 阅读 `01_pcp_dcp_detailed_analysis.md` 完整内容
    - 理解 KV 缓存切分方式
    - 掌握 PCP/DCP 的技术实现
 
-### 高级：完整的并行架构理解
-6. 阅读 `02_pcp_dcp_parallel_group_structure.md`
+7. 阅读 `03_communication_and_topology_optimization.md` 的"通信量分析"
+   - 理解每种并行策略的精确通信量
+   - 学会计算单层通信开销
+
+### 高级：完整的并行架构理解与优化
+8. 阅读 `02_pcp_dcp_parallel_group_structure.md`
    - 理解 5D Rank 组织
    - 掌握各并行组的创建和关系
    - 能够设计自己的并行配置
 
-7. 阅读 `sequence_parallelism_corrections.md` 和 `sp_full_analysis.md`
-   - 理解为什么做某些优化，不做某些优化
-   - 能够理解 vLLM 的设计哲学
+9. 完整阅读 `03_communication_and_topology_optimization.md`
+   - 掌握 DCP 的使用策略和选择算法
+   - 能够根据硬件拓扑设计最优配置
+   - 学习性能预测和瓶颈识别方法
+
+10. 阅读 `sequence_parallelism_corrections.md` 和 `sp_full_analysis.md`
+    - 理解为什么做某些优化，不做某些优化
+    - 能够理解 vLLM 的设计哲学
 
 ---
 
@@ -237,13 +261,25 @@ CP: 低通信/计算比 (只在 Attention 时通信)
 
 ## ✅ 检查清单：你是否掌握了？
 
+**基础（第 1-3 步）**
 - [ ] 能够解释 ColumnParallel 和 RowParallel 的区别
 - [ ] 理解为什么 MoE 需要 All-to-All（以及为什么是 2 次）
+- [ ] 了解自己集群的拓扑（单节点、多节点、拓扑细节）
+- [ ] 能从推荐配置表中快速查到合适的配置
+
+**进阶（第 4-7 步）**
 - [ ] 能够计算 All-to-All 的通信量（token 数、expert 数）
 - [ ] 掌握序列切分的 3 个上下文一致性机制
-- [ ] 理解 PCP 和 DCP 的本质区别
+- [ ] 理解 PCP（token 分块）和 DCP（KV T 维分片）的本质区别
+- [ ] 能够估算单层的通信量（TP、PP、PCP、DCP）
+
+**精通（第 8-10 步）**
 - [ ] 能够根据 rank 号推导其并行 IDs
 - [ ] 能够画出自己配置的 5D Rank 组织图
+- [ ] 掌握 DCP 的选择算法：何时启用、dcp_size 如何取值
+- [ ] 能够用 Roofline 模型预测瓶颈（通信 vs 计算）
+- [ ] 能够为自己的集群设计一套完整的并行配置
+- [ ] 理解 vLLM 的设计哲学：为什么选择这些优化，不做那些优化
 - [ ] 理解各并行维度的通信模式和开销
 
 ---

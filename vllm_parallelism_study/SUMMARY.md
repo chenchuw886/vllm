@@ -8,35 +8,44 @@
 ```
 vllm_parallelism_study/
 ├── README.md                                      (主目录)
+├── SUMMARY.md                                     (学习总结)
 ├── moe_sharding_communication_table.md           (MoE 权重切分)
 ├── sequence_parallelism_explained.md             (SP 原理)
 ├── sequence_parallelism_corrections.md           (SP 纠错)
 ├── sp_full_analysis.md                          (SP 完整分析)
 ├── 01_pcp_dcp_detailed_analysis.md              (PCP/DCP 详解) ✨
-└── 02_pcp_dcp_parallel_group_structure.md       (并行组结构图) ✨
+├── 02_pcp_dcp_parallel_group_structure.md       (并行组结构图) ✨
+└── 03_communication_and_topology_optimization.md (通信量与拓扑优化) ✨⚡
 ```
 
-**总大小**: ~96 KB，约 7 个完整 Markdown 文档
+**总大小**: ~160 KB，约 9 个完整 Markdown 文档
 
 ### 2️⃣ PCP/DCP 理解 ✓
 
 #### Context Parallel (CP) 的核心概念
 ```
-目的: 减少 KV 缓存内存占用
-机制: 将 Attention KV head 维度分散到多个 GPU
-优势: 每个 GPU 只存储 1/cp_size 的 KV 缓存
+目的: 面向长上下文推理的两类瓶颈
+  - Prefill: 降低 TTFT，将长序列预填充分摊到多卡
+  - Decode: 降低 KV cache 内存占用，提高并发
+机制:
+  - PCP: 将请求 token 序列按卡数分块并行计算 Q/K/V
+  - DCP: 在 TP 已按 head 切分后，再沿 T 维度分片 KV cache
 ```
 
 #### PCP (Prefill Context Parallel)
 - **应用**: 推理预填充阶段
-- **分散方式**: KV head 维度按 pcp_size 切分
-- **通信**: All-Gather (聚合 Q) + ReduceScatter (分散输出)
+- **分散方式**: 将请求 token 序列按 pcp_size 分块，每卡计算其 chunk 的 Q/K/V
+- **两种策略**:
+  1) Partial Q + Full K/V：收集全量 K/V 后计算各自的 Q chunk
+  2) Partial Q + Partial K/V：使用 ring-attention 等分块发送/接收 K/V
+- **通信**: 取决于策略（K/V gather 或 ring send/recv）
 - **代码位置**: `vllm/v1/attention/backends/flashinfer.py` L242-257
 
 #### DCP (Decode Context Parallel)
 - **应用**: 推理解码阶段
-- **分散方式**: KV head 维度按 dcp_size 切分
-- **通信**: All-Gather (补齐完整 KV) + ReduceScatter (分散输出)
+- **分散方式**: 在 TP 已按 KV head 切分后，再沿 T 维度分片 KV cache
+- **范围约束**: `dcp_size ∈ [1, tp_size / H_kv]`（H_kv 为 kv-head 数）
+- **通信**: 访问跨分片 KV 的通信随 dcp_size 增大而增加
 - **代码位置**: `vllm/v1/attention/backends/flashinfer.py` L1476-1497
 - **关键特性**: **复用 TP 组的 GPU**，不增加 world_size
 
@@ -120,14 +129,15 @@ EP 组 (2 个):
 ```
 不同于 Sequence Parallel:
 - SP: 沿序列维切分 (减少激活内存)
-- CP: 沿 head 维切分 (减少 KV 缓存内存)
+- CP: prefill 做 token 分块，decode 做 KV cache 的 T 维分片
 
-不是通信优化:
+不是单纯通信优化:
 - SP: AllReduce → ReduceScatter+AllGather (优化通信)
-- CP: 本质上是存储优化 (改变 KV 缓存分布)
+- CP: 以存储与吞吐为目标，同时引入必要通信
 
-但都需要通信:
-- PCP/DCP: All-Gather (补齐完整 KV) + ReduceScatter (分散输出)
+通信形式随策略变化:
+- PCP: K/V gather 或 ring-attention send/recv
+- DCP: 跨分片 KV 访问的通信随 dcp_size 增加
 ```
 
 ### 发现 4: DCP 复用 TP 组
@@ -155,21 +165,21 @@ DCP 的特殊性:
 | **PP** | Send/Recv | 阶段间 | activation | 中 | 1/pp |
 | **EP** | All-to-All | MoE 层 | tokens×inter | 高 | 1/ep |
 | **SP** | ReduceScatter + AllGather | 每层 | hidden_size | 中 | ~1/tp |
-| **PCP** | AllGather + ReduceScatter | Prefill | KV cache | 低 | ~1/pcp |
-| **DCP** | AllGather + ReduceScatter | Decode | KV cache | 低 | ~1/dcp |
+| **PCP** | K/V gather 或 ring send/recv | Prefill | 序列 chunk 的 K/V | 中 | 降低 TTFT |
+| **DCP** | 跨分片 KV 访问通信 | Decode | KV cache (按 T 分片) | 中 | 降低 KV 重复 |
 
 ### 推理流程中的通信
 
 ```
 Prefill (预填充) 时:
-├─ Attention: PCP All-Gather (补齐 Q)
-├─ Attention: TP All-Reduce (权重聚合)
+├─ PCP: 按 token chunk 并行计算 Q/K/V
+├─ Attention: 视策略进行 K/V gather 或 ring-attention
 ├─ MLP: TP All-Reduce (w2 输出)
-└─ 保存 KV Cache (分散到 PCP ranks)
+└─ KV Cache: 依据策略保存（全量或分片）
 
 Decode (解码) 时:
-├─ Attention: DCP All-Gather (补齐 K, V)
-├─ Attention: TP All-Reduce (权重聚合)
+├─ DCP: KV cache 按 T 维分片（降低重复）
+├─ Attention: 访问跨分片 KV（通信随 dcp_size 增加）
 ├─ MLP: TP All-Reduce (w2 输出)
 └─ 下一 Token (循环)
 
@@ -217,6 +227,64 @@ MoE 层:
 
 ---
 
+## 📊 通信量与拓扑优化
+
+详见 **[03_communication_and_topology_optimization.md](03_communication_and_topology_optimization.md)** ⚡
+
+### 通信量精确估算
+
+| 并行策略 | 单位通信量 | Prefill | Decode | 说明 |
+|---------|----------|--------|--------|------|
+| **TP** | 2B·H | 每层 2 次 All-Reduce | 每层 2 次 | QKV/FFN w2 |
+| **PP** | B·H | 传递 activation | 传递 activation | 相邻阶段间 |
+| **PCP (A)** | 2BT·H_kv | K/V gather + scatter | 无 | Partial Q + Full K/V |
+| **PCP (B)** | ≈ BT·H | 分块交换 K/V | 无 | Ring-attention |
+| **DCP** | BT_s·H·(1-1/dcp) | 无 | 跨分片 KV 访问 | 随 dcp_size 增长 |
+| **EP** | 2BT·H | 2 × All-to-All | 无 | Dispatch + Collect |
+
+### 硬件拓扑推荐
+
+**单节点（NVLink）**：全部并行维度都能放
+```
+推荐: TP=8, PCP=1, DCP=min(8, tp_size/H_kv)
+```
+
+**多节点（IB/以太）**：按通信频率优化
+```
+推荐: 
+  - 节点内: TP + PCP + DCP
+  - 跨节点: PP 或 DP（低频率）
+避免: TP 或 EP 跨节点（会饱和链路）
+```
+
+**超节点（多级拓扑）**：分层设计
+```
+层级 1 (快): TP + DCP
+层级 2 (中): PCP + EP
+层级 3 (慢): PP + DP
+```
+
+### DCP 使用算法
+
+1. 计算 `max_dcp = tp_size / H_kv`
+2. 若 `max_dcp < 2`：`dcp_size = 1`（不值得）
+3. 若 `2 ≤ max_dcp < 4`：试 `dcp_size = 2`
+4. 若 `max_dcp ≥ 4`：先用最大值，若通信成瓶颈则降至 2~4
+
+### 配置快速参考表
+
+| 规模 | 模型 | 推荐配置 |
+|------|------|--------|
+| 8 GPU | 70B, 4K tokens | TP=8, DCP=1 |
+| 8 GPU | 70B, 100K tokens | TP=8, DCP=8 |
+| 16 GPU (2×8) | 140B | TP=8(node), PP=2 |
+| 32 GPU (4×8) | 300B | TP=4, PP=2, DP=2 |
+| 64 GPU (8×8) | 500B | TP=4, PCP=2, PP=2, DCP=2, DP=2 |
+
+详见第 03 文档的"推理/训练配置表"。
+
+---
+
 ## 💡 高级理解
 
 ### 为什么 vLLM 同时支持 3 种 "切分"？
@@ -233,17 +301,17 @@ MoE 层:
    - 代替: All-Reduce 优化
 
 3. **Context Parallel (KV 缓存切分)**
-   - 切分维度: Attention head
-   - 目的: 减少推理时 KV 缓存内存
-   - 通信: 每层 AllGather + ReduceScatter (Attention)
+   - 切分维度: Token 序列（Prefill）或 T 维度（Decode）
+   - 目的: 降低 TTFT（PCP）和减少 KV 内存（DCP）
+   - 通信: 视策略（K/V gather 或 ring send/recv）
    - 新增: 不是 All-Reduce 替代品
 
 ### 它们可以混合使用吗？
 
 ✅ **可以**：
 - TP + SP: 权重切分 + 激活切分（同一模型）
-- TP + PCP: 权重切分 + 预填充 KV 缓存切分
-- TP + DCP: 权重切分 + 解码 KV 缓存切分
+- TP + PCP: 权重切分 + 预填充 token 分块
+- TP + DCP: 权重切分 + 解码 KV 缓存 T 维分片
 - TP + PCP + DCP: 上述的完整组合
 - TP + SP + PCP: 理论上可行（但实现复杂）
 
