@@ -1,6 +1,6 @@
 # vLLM 首批 30 个测试用例的 Ascend CI 适配分析
 
-更新时间：2026-03-24
+更新时间：2026-03-25
 
 ## 1. 分析范围
 
@@ -75,6 +75,8 @@
 - `tests/entrypoints/openai/tool_parsers/test_openai_tool_parser.py`
 - `tests/entrypoints/pooling/score/test_correctness_mteb.py`
 - `tests/entrypoints/pooling/classify/test_online.py`
+- `tests/entrypoints/openai/test_transcription_validation_whisper.py`
+- `tests/entrypoints/openai/test_video.py`
 - `tests/entrypoints/openai/test_sparse_tensor_validation.py`
 - `tests/kernels/attention/test_flashmla_sparse.py`
 - `tests/kernels/core/test_activation.py`
@@ -102,6 +104,8 @@
   - 用于推进 `tests/entrypoints/pooling/score/test_correctness_mteb.py` 的 collection 阶段
 - `bm25s`
   - 由 `mteb` 运行时提示缺失后补装（`mteb[bm25s]` 依赖链的一部分），用于继续推进 `test_correctness_mteb.py`
+- `PyStemmer`
+  - 在补齐 `bm25s` 后继续运行 `test_correctness_mteb.py` 时缺失 `Stemmer` 模块，补装后将失败推进到更深的 benchmark 运行栈
 
 ---
 
@@ -238,13 +242,13 @@
 | `tests/entrypoints/openai/test_openai_schema.py` | OpenAI schema / schemathesis fuzz | schemathesis + server + 模型构成高噪声链路 | 不适合用作 Ascend 高频 CI 守护 | flaky or nondeterministic test | test | `tests/entrypoints/openai/test_openai_schema.py` | 不建议 | `reject` |
 | `tests/entrypoints/openai/test_sparse_tensor_validation.py` | 稀疏张量安全校验 | 实测 `torch.load(weights_only=True)` 抛 `UnpicklingError`；部分集成 case 又落入默认模型联网 | 真正值得关注的是测试对异常类型假设过窄；网络只是次级噪声 | compiler or runtime compatibility problem + test precondition missing | `vllm` test / runtime stack | `vllm/multimodal/media/image.py`, `vllm/multimodal/media/audio.py` | 非常值得，属于 P0 安全防护 | `presubmit`（修测试后） |
 | `tests/entrypoints/openai/test_tensorizer_entrypoint.py` | tensorizer loader + OpenAI endpoint | 首阻塞为 tensorizer/CUDA 型前提 | upstream 文件偏 CUDA/tensorizer 专用，不适合作为 Ascend 原样 CI | test not applicable on Ascend platform | test | `tests/entrypoints/openai/test_tensorizer_entrypoint.py` | 不建议原样纳入 | `manual` |
-| `tests/entrypoints/openai/test_transcription_validation_whisper.py` | Whisper API 入参与行为校验 | `ModelScope` 缺仓库时回退 Hugging Face 后，`openai/whisper-large-v3-turbo` 成功解析为 `WhisperForConditionalGeneration`，随后进入 `model.safetensors`（约 `1.62G`）下载 | 更深根因已不是模型源解析失败，而是真实 Whisper 模型准备成本；在本次分析时，尚未到达 API 断言，首先稳定暴露的是大模型权重获取前置条件 | external model or dataset unavailable | test / environment | `tests/entrypoints/openai/test_transcription_validation_whisper.py::server`, `tests/utils.py::RemoteOpenAIServer` | 一般 | `manual` |
-| `tests/entrypoints/openai/test_video.py` | 视频输入 OpenAI 接口 | 切到 ModelScope 后，`llava-hf/llava-onevision-qwen2-0.5b-ov-hf` 不仅下载推理所需文件，还继续拉取整仓 ONNX 产物（`decoder_model_merged*.onnx` 等） | 首个稳定根因是模型分发侧的资源体量问题：该测试在进入视频 API 语义前，先被全仓大文件下载链路吞噬；这比“外部视频资源重”更靠前、更稳定 | external model or dataset unavailable | test / external model registry | `tests/entrypoints/openai/test_video.py::server`, `vllm/transformers_utils/repo_utils.py` | 不建议进入高频 CI | `reject` |
-| `tests/entrypoints/openai/test_vision.py` | 图片类 OpenAI 视觉接口 | 代理与 `no_proxy` 生效后，测试进入 `microsoft/Phi-3.5-vision-instruct` 多 GB 权重下载阶段，未在合理分析时间内到达更深失败 | 当前主阻塞不再是网络连通性，而是重资源模型准备成本；继续推进需要预缓存大体量 VLM 权重，适合作为预置资源后的集成回归 | test precondition missing | test / environment | `tests/entrypoints/openai/test_vision.py`, `tests/entrypoints/openai/test_vision.py::server` | 值得，但应在有预缓存的 CI 层级运行 | `nightly`（需预缓存大模型并设置 `no_proxy`） |
+| `tests/entrypoints/openai/test_transcription_validation_whisper.py` | Whisper API 入参与行为校验 | 继续按 `<7B` 策略重跑最小语义 case（`test_bad_requests`）：服务端可稳定解析 `WhisperForConditionalGeneration`，但启动阶段持续停留在 `model.safetensors (1.62G)` 拉取（最新观测约 `67MB/1.62G`） | 当前首个稳定阻塞仍是模型准备成本（下载吞吐/缓存预置），尚未进入 API 断言层；根因已从“模型源不可达”收敛为“重资源前置条件未满足” | test precondition missing | test / environment | `tests/entrypoints/openai/test_transcription_validation_whisper.py::server`, `tests/utils.py::RemoteOpenAIServer` | 一般 | `manual`（建议预缓存后再评估语义层） |
+| `tests/entrypoints/openai/test_video.py` | 视频输入 OpenAI 接口 | 继续按 `<7B` 策略重跑最小语义 case（`test_error_on_invalid_video_url_type`）：可完成配置解析并进入 `model.safetensors (1.79G)` 下载，最新观测约 `256MB/1.79G` 后仍未进入断言阶段 | 当前首个稳定阻塞仍是模型准备成本；虽然模型参数量 `<7B`，但实际前置资源链路仍重（权重下载 + 潜在整仓附加文件），导致尚未到语义断言层 | test precondition missing | test / environment | `tests/entrypoints/openai/test_video.py::server`, `vllm/transformers_utils/repo_utils.py` | 价值一般，不适合高频 CI | `manual`（建议仅在预缓存环境做夜间回归） |
+| `tests/entrypoints/openai/test_vision.py` | 图片类 OpenAI 视觉接口 | 继续重跑最小语义 case（`test_error_on_invalid_image_url_type`）时，可稳定到 `Phi3VForCausalLM` 解析，但随后在权重准备阶段进入 `filelock` 等待（`filelock/_api.py`），未到 API 断言 | 当前主阻塞已收敛为重资源模型准备成本 + 缓存锁竞争（非网络不可达）；该阻塞在多次中断/重试后可复现，继续推进需预缓存完整 VLM 权重并避免并发下载竞争 | test precondition missing | test / environment | `tests/entrypoints/openai/test_vision.py::server`, `filelock/_api.py` | 值得，但应在有预缓存的 CI 层级运行 | `nightly`（需预缓存大模型并设置 `no_proxy`） |
 | `tests/entrypoints/openai/tool_parsers/test_openai_tool_parser.py` | tool parser 与 reasoning/tool schema | 补齐 `rapidfuzz`、并通过 `VLLM_PLUGINS=ascend` 排除双平台插件冲突后，server 初始化在 `openai/gpt-oss-20b` 处失败：`mxfp4 quantization is currently not supported in npu` | 更深根因是该模型默认量化格式与 Ascend 平台不兼容；已越过“缺依赖/环境噪声”，进入真实平台能力边界 | compiler or runtime compatibility problem | runtime stack / upstream model config | `tests/entrypoints/openai/tool_parsers/test_openai_tool_parser.py::server`, `vllm/engine/arg_utils.py::create_model_config` | 一般 | `manual` |
-| `tests/entrypoints/pooling/classify/test_online.py` | 在线 classify 服务契约 | 在 `<7B` 允许下载条件下继续推进：`Qwen2.5-1.5B-apeach` 已进入 2 个分片权重下载阶段（观测到约 `201MB/5.00GB` 与 `268MB/1.18GB`） | 当前稳定阻塞仍是模型准备时间成本（非网络/依赖错误）；尚未到达 API 断言层失败，说明该 case 进入高成本前置阶段 | test precondition missing | test / environment | `tests/entrypoints/pooling/classify/test_online.py::server` | 值得 | `nightly`（建议预缓存后再做功能断言） |
+| `tests/entrypoints/pooling/classify/test_online.py` | 在线 classify 服务契约 | 在 `<7B` 允许下载条件下继续推进：`Qwen2.5-1.5B-apeach` 稳定进入 2 个分片权重下载阶段（最近一次观测约 `201MB/5.00GB` 与 `201MB/1.18GB`）但尚未进入 API 断言 | 当前稳定阻塞仍是模型准备时间成本（非网络/依赖错误）；未出现更深语义失败，说明该 case 仍处高成本前置阶段 | test precondition missing | test / environment | `tests/entrypoints/pooling/classify/test_online.py::server` | 值得 | `nightly`（建议预缓存后再做功能断言） |
 | `tests/entrypoints/pooling/classify/test_online_vision.py` | 多模态 classify（文本/图像/视频） | `ModelScope` 缺仓库时回退 Hugging Face 后，文本 case 可解析出 `Qwen2_5_VLForSequenceClassification`，随后进入 4 个分片权重下载（约 `4.97G + 4.99G + 4.93G + 602M`） | 更深根因已不是模型源不存在，而是 7B 视频分类模型的超大权重准备成本；即使只测文本输入，也会被共享 server fixture 的大模型启动前置条件阻塞 | external model or dataset unavailable | test / environment | `tests/entrypoints/pooling/classify/test_online_vision.py::server`, `tests/entrypoints/pooling/classify/test_online_vision.py::test_chat_text_request` | 可保留小子集，但需强预缓存 | `manual` |
-| `tests/entrypoints/pooling/score/test_correctness_mteb.py` | pooling/score 在 MTEB 上的正确性 | 补齐 `mteb` 后首个失败推进为缺少 `bm25s`；补齐 `bm25s` 后，case 可继续进入 server 启动和 MTEB 运行准备阶段 | 更深根因已从“mteb 缺失”推进到 benchmark 运行栈依赖链与高成本执行前置；当前主要风险转为评测运行成本而非基础缺包 | test precondition missing | test / environment | `tests/models/language/pooling_mteb_test/mteb_score_utils.py::run_mteb_rerank`, `mteb.models.model_implementations.bm25` | 有价值但高成本 | `nightly`（需预装 `mteb`/`bm25s`） |
+| `tests/entrypoints/pooling/score/test_correctness_mteb.py` | pooling/score 在 MTEB 上的正确性 | 按依赖链补齐 `mteb` → `bm25s` → `PyStemmer` 后，`test_mteb_score` 可完成 server 启动、数据集下载与首轮评测，但在 `task.convert_to_reranking()` 二次处理时稳定报错：`TypeError: 'NoneType' object is not subscriptable` | 真实根因已推进到 MTEB benchmark 栈内部状态错误（`mteb/abstasks/retrieval.py::_process_data` 访问 `self.dataset[hf_subset]` 时对象为空），属于外部评测框架/版本兼容问题，而非 Ascend 适配缺陷 | compiler or runtime compatibility problem | runtime stack / external dependency | `tests/models/language/pooling_mteb_test/mteb_score_utils.py::run_mteb_rerank`, `mteb/abstasks/retrieval.py::_process_data` | 有价值但高成本，且依赖外部评测栈稳定性 | `nightly`（建议固定 mteb 版本并预装 `mteb`/`bm25s`/`PyStemmer`） |
 | `tests/entrypoints/sagemaker/test_sagemaker_lora_adapters.py` | SageMaker 动态 LoRA adapter 管理 | 首阻塞为 runtime LoRA 更新路径 | 这是 Ascend 典型集成边界，应验证是否保留 upstream 语义 | `vllm-ascend` adaptation defect | `vllm-ascend` | `tests/entrypoints/sagemaker/test_sagemaker_lora_adapters.py` | 值得 | `nightly` |
 | `tests/entrypoints/sagemaker/test_sagemaker_stateful_sessions.py` | SageMaker session header/stateful invocation | 静态看无明显平台专属阻塞 | 更偏 API/middleware 契约，可作为高信号守护 | portable/no obvious blocker | `vllm` | `tests/entrypoints/sagemaker/test_sagemaker_stateful_sessions.py` | 值得 | `presubmit`（需小模型前置） |
 | `tests/evals/gpt_oss/test_gpqa_correctness.py` | GPQA eval 正确性 | 直接运行时 `request.config.getoption("--model")` 得到 `None`，随后 `RemoteOpenAIServer` 参数解析因 `None.startswith(...)` 抛 `AttributeError` | 首个稳定根因是测试必须通过 pytest 选项显式提供 `--model`/`--metric` 等评测参数；它不是可直接收集执行的普通单测 | test precondition missing | test | `tests/evals/gpt_oss/test_gpqa_correctness.py`, `vllm/utils/argparse_utils.py::FlexibleArgumentParser.parse_args` | 不建议 | `reject` |
