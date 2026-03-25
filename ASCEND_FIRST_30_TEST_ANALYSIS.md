@@ -72,13 +72,15 @@
 - `tests/distributed/test_distributed_oot.py`
 - `tests/distributed/test_sequence_parallel.py`
 - `tests/entrypoints/llm/test_mm_cache_stats.py`
+- `tests/entrypoints/openai/tool_parsers/test_openai_tool_parser.py`
+- `tests/entrypoints/pooling/score/test_correctness_mteb.py`
+- `tests/entrypoints/pooling/classify/test_online.py`
 - `tests/entrypoints/openai/test_sparse_tensor_validation.py`
 - `tests/kernels/attention/test_flashmla_sparse.py`
 - `tests/kernels/core/test_activation.py`
 
 ### 本次分析中未做的环境修改
 
-- 未安装新增 Python 依赖
 - 未修改产品代码
 
 ### 本次分析中使用过的最小化工作绕过
@@ -91,7 +93,15 @@
 - 对依赖本地资源服务的测试额外设置：
   - `no_proxy=127.0.0.1,localhost`
   - `NO_PROXY=127.0.0.1,localhost`
-- 未安装新增依赖；仅允许测试按需下载缺失模型/权重
+
+### 本次分析中新增安装的最小依赖
+
+- `rapidfuzz`
+  - 用于推进 `tests/entrypoints/openai/tool_parsers/test_openai_tool_parser.py` 的 collection 阶段
+- `mteb`
+  - 用于推进 `tests/entrypoints/pooling/score/test_correctness_mteb.py` 的 collection 阶段
+- `bm25s`
+  - 由 `mteb` 运行时提示缺失后补装（`mteb[bm25s]` 依赖链的一部分），用于继续推进 `test_correctness_mteb.py`
 
 ---
 
@@ -231,10 +241,10 @@
 | `tests/entrypoints/openai/test_transcription_validation_whisper.py` | Whisper API 入参与行为校验 | `ModelScope` 缺仓库时回退 Hugging Face 后，`openai/whisper-large-v3-turbo` 成功解析为 `WhisperForConditionalGeneration`，随后进入 `model.safetensors`（约 `1.62G`）下载 | 更深根因已不是模型源解析失败，而是真实 Whisper 模型准备成本；在本次分析时，尚未到达 API 断言，首先稳定暴露的是大模型权重获取前置条件 | external model or dataset unavailable | test / environment | `tests/entrypoints/openai/test_transcription_validation_whisper.py::server`, `tests/utils.py::RemoteOpenAIServer` | 一般 | `manual` |
 | `tests/entrypoints/openai/test_video.py` | 视频输入 OpenAI 接口 | 切到 ModelScope 后，`llava-hf/llava-onevision-qwen2-0.5b-ov-hf` 不仅下载推理所需文件，还继续拉取整仓 ONNX 产物（`decoder_model_merged*.onnx` 等） | 首个稳定根因是模型分发侧的资源体量问题：该测试在进入视频 API 语义前，先被全仓大文件下载链路吞噬；这比“外部视频资源重”更靠前、更稳定 | external model or dataset unavailable | test / external model registry | `tests/entrypoints/openai/test_video.py::server`, `vllm/transformers_utils/repo_utils.py` | 不建议进入高频 CI | `reject` |
 | `tests/entrypoints/openai/test_vision.py` | 图片类 OpenAI 视觉接口 | 代理与 `no_proxy` 生效后，测试进入 `microsoft/Phi-3.5-vision-instruct` 多 GB 权重下载阶段，未在合理分析时间内到达更深失败 | 当前主阻塞不再是网络连通性，而是重资源模型准备成本；继续推进需要预缓存大体量 VLM 权重，适合作为预置资源后的集成回归 | test precondition missing | test / environment | `tests/entrypoints/openai/test_vision.py`, `tests/entrypoints/openai/test_vision.py::server` | 值得，但应在有预缓存的 CI 层级运行 | `nightly`（需预缓存大模型并设置 `no_proxy`） |
-| `tests/entrypoints/openai/tool_parsers/test_openai_tool_parser.py` | tool parser 与 reasoning/tool schema | collection 阶段即因 `ModuleNotFoundError: No module named 'rapidfuzz'` 失败 | 首个稳定根因不是模型，而是测试前置 Python 依赖缺失；在补齐 `rapidfuzz` 前，完全进不到 OpenAI tool parser 代码路径 | test precondition missing | test | `tests/entrypoints/openai/tool_parsers/test_openai_tool_parser.py`, `rapidfuzz` | 一般 | `manual` |
-| `tests/entrypoints/pooling/classify/test_online.py` | 在线 classify 服务契约 | 代理生效后进入 `jason9693/Qwen2.5-1.5B-apeach` 权重下载阶段，未在合理分析时间内到达更深产品失败 | 当前主阻塞是分类模型资源准备成本，而不是网络不可达；具备预缓存后，这组 case 仍是高价值的 pooling 在线契约守护 | test precondition missing | test / environment | `tests/entrypoints/pooling/classify/test_online.py`, `tests/entrypoints/pooling/classify/test_online.py::server` | 值得 | `nightly`（需预缓存模型） |
+| `tests/entrypoints/openai/tool_parsers/test_openai_tool_parser.py` | tool parser 与 reasoning/tool schema | 补齐 `rapidfuzz`、并通过 `VLLM_PLUGINS=ascend` 排除双平台插件冲突后，server 初始化在 `openai/gpt-oss-20b` 处失败：`mxfp4 quantization is currently not supported in npu` | 更深根因是该模型默认量化格式与 Ascend 平台不兼容；已越过“缺依赖/环境噪声”，进入真实平台能力边界 | compiler or runtime compatibility problem | runtime stack / upstream model config | `tests/entrypoints/openai/tool_parsers/test_openai_tool_parser.py::server`, `vllm/engine/arg_utils.py::create_model_config` | 一般 | `manual` |
+| `tests/entrypoints/pooling/classify/test_online.py` | 在线 classify 服务契约 | 在 `<7B` 允许下载条件下继续推进：`Qwen2.5-1.5B-apeach` 已进入 2 个分片权重下载阶段（观测到约 `201MB/5.00GB` 与 `268MB/1.18GB`） | 当前稳定阻塞仍是模型准备时间成本（非网络/依赖错误）；尚未到达 API 断言层失败，说明该 case 进入高成本前置阶段 | test precondition missing | test / environment | `tests/entrypoints/pooling/classify/test_online.py::server` | 值得 | `nightly`（建议预缓存后再做功能断言） |
 | `tests/entrypoints/pooling/classify/test_online_vision.py` | 多模态 classify（文本/图像/视频） | `ModelScope` 缺仓库时回退 Hugging Face 后，文本 case 可解析出 `Qwen2_5_VLForSequenceClassification`，随后进入 4 个分片权重下载（约 `4.97G + 4.99G + 4.93G + 602M`） | 更深根因已不是模型源不存在，而是 7B 视频分类模型的超大权重准备成本；即使只测文本输入，也会被共享 server fixture 的大模型启动前置条件阻塞 | external model or dataset unavailable | test / environment | `tests/entrypoints/pooling/classify/test_online_vision.py::server`, `tests/entrypoints/pooling/classify/test_online_vision.py::test_chat_text_request` | 可保留小子集，但需强预缓存 | `manual` |
-| `tests/entrypoints/pooling/score/test_correctness_mteb.py` | pooling/score 在 MTEB 上的正确性 | collection 阶段即因 `ModuleNotFoundError: No module named 'mteb'` 失败 | 首个稳定根因是 benchmark 依赖包未安装；在补齐 `mteb` 前，既不会拉模型，也不会进入 MTEB 数据任务执行 | test precondition missing | test | `tests/models/language/pooling_mteb_test/mteb_score_utils.py`, `mteb` | 有价值但高成本 | `nightly` |
+| `tests/entrypoints/pooling/score/test_correctness_mteb.py` | pooling/score 在 MTEB 上的正确性 | 补齐 `mteb` 后首个失败推进为缺少 `bm25s`；补齐 `bm25s` 后，case 可继续进入 server 启动和 MTEB 运行准备阶段 | 更深根因已从“mteb 缺失”推进到 benchmark 运行栈依赖链与高成本执行前置；当前主要风险转为评测运行成本而非基础缺包 | test precondition missing | test / environment | `tests/models/language/pooling_mteb_test/mteb_score_utils.py::run_mteb_rerank`, `mteb.models.model_implementations.bm25` | 有价值但高成本 | `nightly`（需预装 `mteb`/`bm25s`） |
 | `tests/entrypoints/sagemaker/test_sagemaker_lora_adapters.py` | SageMaker 动态 LoRA adapter 管理 | 首阻塞为 runtime LoRA 更新路径 | 这是 Ascend 典型集成边界，应验证是否保留 upstream 语义 | `vllm-ascend` adaptation defect | `vllm-ascend` | `tests/entrypoints/sagemaker/test_sagemaker_lora_adapters.py` | 值得 | `nightly` |
 | `tests/entrypoints/sagemaker/test_sagemaker_stateful_sessions.py` | SageMaker session header/stateful invocation | 静态看无明显平台专属阻塞 | 更偏 API/middleware 契约，可作为高信号守护 | portable/no obvious blocker | `vllm` | `tests/entrypoints/sagemaker/test_sagemaker_stateful_sessions.py` | 值得 | `presubmit`（需小模型前置） |
 | `tests/evals/gpt_oss/test_gpqa_correctness.py` | GPQA eval 正确性 | 直接运行时 `request.config.getoption("--model")` 得到 `None`，随后 `RemoteOpenAIServer` 参数解析因 `None.startswith(...)` 抛 `AttributeError` | 首个稳定根因是测试必须通过 pytest 选项显式提供 `--model`/`--metric` 等评测参数；它不是可直接收集执行的普通单测 | test precondition missing | test | `tests/evals/gpt_oss/test_gpqa_correctness.py`, `vllm/utils/argparse_utils.py::FlexibleArgumentParser.parse_args` | 不建议 | `reject` |
@@ -345,6 +355,14 @@
   - 直接运行时并不是卡模型，而是测试本身缺少 `--model` 等命令行参数
   - 属于 eval 型测试的执行前置条件问题
 
+7. `tests/entrypoints/openai/tool_parsers/test_openai_tool_parser.py`
+  - 在补齐 `rapidfuzz` 并排除双平台插件冲突后，失败推进到 `openai/gpt-oss-20b` 的 `mxfp4` 量化不支持 NPU
+  - 属于真实平台能力边界问题，而不是依赖缺失
+
+8. `tests/entrypoints/pooling/score/test_correctness_mteb.py`
+  - 在补齐 `mteb` 后又暴露 `bm25s` 依赖链问题；补齐后可进一步进入 MTEB 运行准备
+  - 说明其核心挑战是 benchmark 运行栈与执行成本，而不再是基础缺包
+
 ### 6.2 这一批里“网络问题”的正确解读
 
 - 不是简单地说“网络坏了，所以分析不下去”；
@@ -356,7 +374,7 @@
   - 代理副作用（如 `localhost` 资源被错误走代理，应通过 `no_proxy` 排除）
   - 模型源映射缺口（如 `Whisper` / `VideoCls` 仓库在当前 ModelScope 路径下不存在）
   - 模型源回退后暴露的真实大模型准备成本（如 Hugging Face 多 GB 权重）
-  - 测试前置依赖缺失（如 `mteb`、`rapidfuzz`、pytest `--model` 参数）
+  - 测试前置依赖缺失（如 `mteb`、`rapidfuzz`、`bm25s`、pytest `--model` 参数）
 
 ### 6.3 对 vllm-ascend CI 的启发
 
