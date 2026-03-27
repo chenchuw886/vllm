@@ -1,6 +1,6 @@
 # vLLM 首批 30 个测试用例的 Ascend CI 适配分析
 
-更新时间：2026-03-25
+更新时间：2026-03-27
 
 ## 1. 分析范围
 
@@ -107,7 +107,7 @@
 - `PyStemmer`
   - 在补齐 `bm25s` 后继续运行 `test_correctness_mteb.py` 时缺失 `Stemmer` 模块，补装后将失败推进到更深的 benchmark 运行栈
 - `socksio`
-  - 在 `tests/entrypoints/sagemaker/test_sagemaker_stateful_sessions.py` 中，`openai.AsyncOpenAI` 通过 `httpx` 继承当前 `socks5h` 代理环境时必需；补装后可将失败从异步客户端初始化推进到真实 SageMaker session 语义，并最终确认整文件通过
+  - 在 `tests/entrypoints/sagemaker/test_sagemaker_stateful_sessions.py` 中，`openai.AsyncOpenAI` 通过 `httpx` 继承当前 `socks5h` 代理环境时必需；补装后并切到空闲卡（`ASCEND_RT_VISIBLE_DEVICES=6,7`）可完整通过
 
 ---
 
@@ -186,8 +186,8 @@
   - 其中 `test_mm_cache_stats.py` 在补齐代理后，第一次失败其实是 `127.0.0.1` 本地图片请求被错误走代理
   - 加上 `no_proxy=127.0.0.1,localhost` 后，该测试在 Ascend 上可完整通过
   - 说明它的主问题不是网络，也不是产品缺陷，而是**测试运行前置环境需要正确设置 localhost 直连**
-  - `test_vision.py` 与 `classify/test_online.py` 则进一步暴露出另一类问题：它们会拉取多 GB 权重，分析中已进入真实下载阶段，但继续推进需要较长时间的大规模资源预置
-  - 因此这两项的主问题应表述为**重资源前置条件**，而不是“网络不可达”
+  - `test_vision.py` 与 `classify/test_online.py` 都会拉取多 GB 权重；`classify/test_online.py::test_basic` 在切到空闲卡（6/7）后已可通过
+  - 因此这两项主问题应表述为**重资源前置 + 设备占用敏感**，而不是“网络不可达”
 
 #### C. 测试天然依赖远程大资源，不适合直接进 presubmit
 
@@ -248,11 +248,11 @@
 | `tests/entrypoints/openai/test_video.py` | 视频输入 OpenAI 接口 | 继续按 `<7B` 策略重跑最小语义 case（`test_error_on_invalid_video_url_type`）：可完成配置解析并进入 `model.safetensors (1.79G)` 下载，最新观测约 `256MB/1.79G` 后仍未进入断言阶段 | 当前首个稳定阻塞仍是模型准备成本；虽然模型参数量 `<7B`，但实际前置资源链路仍重（权重下载 + 潜在整仓附加文件），导致尚未到语义断言层 | test precondition missing | test / environment | `tests/entrypoints/openai/test_video.py::server`, `vllm/transformers_utils/repo_utils.py` | 价值一般，不适合高频 CI | `manual`（建议仅在预缓存环境做夜间回归） |
 | `tests/entrypoints/openai/test_vision.py` | 图片类 OpenAI 视觉接口 | 继续重跑最小语义 case（`test_error_on_invalid_image_url_type`）时，可稳定到 `Phi3VForCausalLM` 解析，但随后在权重准备阶段进入 `filelock` 等待（`filelock/_api.py`），未到 API 断言 | 当前主阻塞已收敛为重资源模型准备成本 + 缓存锁竞争（非网络不可达）；该阻塞在多次中断/重试后可复现，继续推进需预缓存完整 VLM 权重并避免并发下载竞争 | test precondition missing | test / environment | `tests/entrypoints/openai/test_vision.py::server`, `filelock/_api.py` | 值得，但应在有预缓存的 CI 层级运行 | `nightly`（需预缓存大模型并设置 `no_proxy`） |
 | `tests/entrypoints/openai/tool_parsers/test_openai_tool_parser.py` | tool parser 与 reasoning/tool schema | 补齐 `rapidfuzz`、并通过 `VLLM_PLUGINS=ascend` 排除双平台插件冲突后，server 初始化在 `openai/gpt-oss-20b` 处失败：`mxfp4 quantization is currently not supported in npu` | 更深根因是该模型默认量化格式与 Ascend 平台不兼容；已越过“缺依赖/环境噪声”，进入真实平台能力边界 | compiler or runtime compatibility problem | runtime stack / upstream model config | `tests/entrypoints/openai/tool_parsers/test_openai_tool_parser.py::server`, `vllm/engine/arg_utils.py::create_model_config` | 一般 | `manual` |
-| `tests/entrypoints/pooling/classify/test_online.py` | 在线 classify 服务契约 | 在 `<7B` 允许下载条件下继续推进：`Qwen2.5-1.5B-apeach` 稳定进入 2 个分片权重下载阶段（最近一次观测约 `201MB/5.00GB` 与 `201MB/1.18GB`）但尚未进入 API 断言 | 当前稳定阻塞仍是模型准备时间成本（非网络/依赖错误）；未出现更深语义失败，说明该 case 仍处高成本前置阶段 | test precondition missing | test / environment | `tests/entrypoints/pooling/classify/test_online.py::server` | 值得 | `nightly`（建议预缓存后再做功能断言） |
+| `tests/entrypoints/pooling/classify/test_online.py` | 在线 classify 服务契约 | 在关闭 `VLLM_USE_MODELSCOPE` 回退 HF 后，`Qwen2.5-1.5B-apeach` 权重可加载并完成 server 启动；切到空闲卡（`ASCEND_RT_VISIBLE_DEVICES=6,7`）后 `test_basic` 通过 | 先前显存失败是设备占用导致的环境噪声，不是用例语义失败；当前该 case 可进入并通过 API 断言 | portable/no obvious blocker（受资源占用影响） | test / environment | `tests/entrypoints/pooling/classify/test_online.py::test_basic` | 值得 | `nightly`（需保证空闲卡与预缓存） |
 | `tests/entrypoints/pooling/classify/test_online_vision.py` | 多模态 classify（文本/图像/视频） | `ModelScope` 缺仓库时回退 Hugging Face 后，文本 case 可解析出 `Qwen2_5_VLForSequenceClassification`，随后进入 4 个分片权重下载（约 `4.97G + 4.99G + 4.93G + 602M`） | 更深根因已不是模型源不存在，而是 7B 视频分类模型的超大权重准备成本；即使只测文本输入，也会被共享 server fixture 的大模型启动前置条件阻塞 | external model or dataset unavailable | test / environment | `tests/entrypoints/pooling/classify/test_online_vision.py::server`, `tests/entrypoints/pooling/classify/test_online_vision.py::test_chat_text_request` | 可保留小子集，但需强预缓存 | `manual` |
 | `tests/entrypoints/pooling/score/test_correctness_mteb.py` | pooling/score 在 MTEB 上的正确性 | 按依赖链补齐 `mteb` → `bm25s` → `PyStemmer` 后，`test_mteb_score` 可完成 server 启动、数据集下载与首轮评测，但在 `task.convert_to_reranking()` 二次处理时稳定报错：`TypeError: 'NoneType' object is not subscriptable` | 真实根因已推进到 MTEB benchmark 栈内部状态错误（`mteb/abstasks/retrieval.py::_process_data` 访问 `self.dataset[hf_subset]` 时对象为空），属于外部评测框架/版本兼容问题，而非 Ascend 适配缺陷 | compiler or runtime compatibility problem | runtime stack / external dependency | `tests/models/language/pooling_mteb_test/mteb_score_utils.py::run_mteb_rerank`, `mteb/abstasks/retrieval.py::_process_data` | 有价值但高成本，且依赖外部评测栈稳定性 | `nightly`（建议固定 mteb 版本并预装 `mteb`/`bm25s`/`PyStemmer`） |
 | `tests/entrypoints/sagemaker/test_sagemaker_lora_adapters.py` | SageMaker 动态 LoRA adapter 管理 | 实跑后整文件通过；覆盖了成功加载/卸载、坏路径 404、非法 `adapter_config.json` 400、带 adapter 的 `/invocations`、多 adapter 批量装卸 | 当前 Ascend 运行时已保留 upstream LoRA API 语义。代码链路是 SageMaker `/adapters` -> `OpenAIServingModels.load_lora_adapter()` -> `engine_client.add_lora()` -> `vllm_ascend.worker.worker.add_lora()`；先前看到的异常其实来自测试里的负例分支（不存在目录、非法 JSON），并被正确映射为 404/400，而不是 Ascend 适配缺陷 | portable/no obvious blocker | `vllm` + `vllm-ascend` | `tests/entrypoints/sagemaker/test_sagemaker_lora_adapters.py`, `vllm/entrypoints/openai/models/serving.py::load_lora_adapter`, `vllm_ascend/worker/worker.py::add_lora` | 非常值得，是典型 P1 适配边界守护 | `presubmit`（需小模型 + LoRA 预缓存） |
-| `tests/entrypoints/sagemaker/test_sagemaker_stateful_sessions.py` | SageMaker session header/stateful invocation | 首轮实跑时，`async_client` fixture 在创建 `openai.AsyncOpenAI` 时因 SOCKS 代理缺少 `socksio` 失败；补装 `socksio` 后整文件通过（5 passed） | 真实失败并不在 SageMaker session middleware 本身，而是在测试夹具 `RemoteOpenAIServer.get_async_client()` 的异步客户端初始化：`AsyncOpenAI` -> `httpx` 默认 `trust_env=True` -> 继承 `socks5h` 代理 -> 缺少 `socksio` 无法构造传输层。补齐依赖后，`/invocations` 上的 `stateful_session_manager()` 与 header 语义均按预期工作，包括 `NEW_SESSION`、缺失 session header 的 `424 invalid session_id`、以及正常会话调用/关闭流程 | test precondition missing（已消除） | test / environment | `tests/entrypoints/sagemaker/conftest.py::async_client`, `tests/utils.py::RemoteOpenAIServer.get_async_client`, `vllm/entrypoints/sagemaker/routes.py::invocations` | 非常值得，信号高且已证明可稳定通过 | `presubmit`（需 `socksio` + 小模型前置） |
+| `tests/entrypoints/sagemaker/test_sagemaker_stateful_sessions.py` | SageMaker session header/stateful invocation | 首轮失败是 `async_client` 缺少 `socksio`；补装后并切到空闲卡（`ASCEND_RT_VISIBLE_DEVICES=6,7`）整文件通过（`5 passed`） | 先前显存失败是设备占用导致的环境噪声；在依赖与空闲卡满足后，session header/middleware 语义与 upstream 一致 | test precondition missing（已消除） | test / environment | `tests/entrypoints/sagemaker/conftest.py::async_client`, `tests/utils.py::RemoteOpenAIServer.get_async_client`, `vllm/entrypoints/sagemaker/routes.py::invocations` | 非常值得（P1） | `presubmit`（需 `socksio` + 小模型缓存） |
 | `tests/evals/gpt_oss/test_gpqa_correctness.py` | GPQA eval 正确性 | 直接运行时 `request.config.getoption("--model")` 得到 `None`，随后 `RemoteOpenAIServer` 参数解析因 `None.startswith(...)` 抛 `AttributeError` | 首个稳定根因是测试必须通过 pytest 选项显式提供 `--model`/`--metric` 等评测参数；它不是可直接收集执行的普通单测 | test precondition missing | test | `tests/evals/gpt_oss/test_gpqa_correctness.py`, `vllm/utils/argparse_utils.py::FlexibleArgumentParser.parse_args` | 不建议 | `reject` |
 | `tests/kernels/attention/test_attention_selector.py` | attention backend 选择逻辑 | 文件主要围绕 CUDA/ROCm backend 选择 | 不是 Ascend upstream 行为契约的合适入口 | test not applicable on Ascend platform | test | `tests/kernels/attention/test_attention_selector.py` | 不建议 | `reject` |
 | `tests/kernels/attention/test_flashmla.py` | dense FlashMLA kernel 正确性 | 明确 `cuda:0` | CUDA 专用 kernel 测试 | test not applicable on Ascend platform | test | `tests/kernels/attention/test_flashmla.py` | 不建议 | `reject` |
@@ -286,8 +286,8 @@
    - 保护安全校验契约，价值很高
 
 3. `tests/entrypoints/sagemaker/test_sagemaker_stateful_sessions.py`
-   - 使用小模型或预缓存模型纳入
-   - 保护 API / session middleware 契约
+  - 补齐 `socksio` 后在空闲卡（6/7）环境已验证整文件通过（5 passed）
+  - 保护 API / session middleware 契约
 
 ### 5.2 推荐纳入 nightly CI
 
