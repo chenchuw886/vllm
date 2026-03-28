@@ -59,35 +59,35 @@
 | 30 | `tests/kernels/moe/test_modular_oai_triton_moe.py` | 不适用 | 否 | reject | Triton MoE 路径，不适用 Ascend。 |
 | 31 | `tests/kernels/moe/test_moe_permute_unpermute.py` | 失败 | 否 | reject | 依赖 `_moe_C` CUDA/MoE 扩展符号。 |
 | 32 | `tests/kernels/quantization/test_machete_mm.py` | 失败 | 否 | reject | 测试假设 `get_device_capability()` 返回 GPU 语义，NPU 为 `None`。 |
-| 33 | `tests/lora/test_add_lora.py` | 未跑通 | 有条件 | nightly | LoRA 预热契约有价值，但模型与服务路径较重。 |
-| 34 | `tests/lora/test_chatglm3_tp.py` | 未跑通 | 有条件 | nightly | `multi_gpu_test(num_gpus=4)`，多卡 TP/LoRA 成本高。 |
-| 35 | `tests/lora/test_default_mm_loras.py` | 未跑通 | 有条件 | manual | 导入期即超大模型下载，需预缓存/本地化。 |
+| 33 | `tests/lora/test_add_lora.py` | 失败 | 是 | nightly | 已推进到 LoRA 激活真实根因：`column_parallel_linear.py::set_lora` 触发 `IndexError: tuple index out of range`。 |
+| 34 | `tests/lora/test_chatglm3_tp.py` | 失败 | 是 | nightly | 已推进到 LoRA 激活真实根因：`column_parallel_linear.py::set_lora` 触发 `IndexError: tuple index out of range`。 |
+| 35 | `tests/lora/test_default_mm_loras.py` | 失败 | 是 | nightly | 不再只是下载前置，运行后稳定失败于多模态 LoRA 激活：`IndexError: tuple index out of range`。 |
 | 36 | `tests/lora/test_gptoss_tp.py` | 未跑通 | 否 | manual | 依赖 `gpt-oss-20b` 量化路径，NPU 当前不支持。 |
-| 37 | `tests/lora/test_mixtral.py` | 未跑通 | 有条件 | manual | Mixtral-8x7B + ray + TP4，资源/分布式成本高。 |
-| 38 | `tests/lora/test_olmoe_tp.py` | 未跑通 | 有条件 | nightly | OLMoE + TP/LoRA 属于重要边界，但成本较高。 |
-| 39 | `tests/lora/test_transformers_model.py` | 未跑通 | 有条件 | nightly | 逻辑有价值，但多卡/模型前置较重。 |
+| 37 | `tests/lora/test_mixtral.py` | 失败 | 是 | nightly | 真实根因是 LoRA 模块注册断言：`block_sparse_moe.gate` 必须是 `BaseLayerWithLoRA`，但当前为 `AscendReplicatedLinear`。 |
+| 38 | `tests/lora/test_olmoe_tp.py` | 失败 | 是 | nightly | 真实根因是 LoRA 模块注册断言：`mlp.gate` 不是 `BaseLayerWithLoRA`，而是 `AscendReplicatedLinear`。 |
+| 39 | `tests/lora/test_transformers_model.py` | 失败 | 有条件 | nightly | 真实根因在编译/ACL 图阶段：`torch._dynamo.exc.InternalTorchDynamoError: AttributeError: 'IlamaConfig' object has no attribute 'decoder'`。 |
 | 40 | `tests/lora/test_worker.py` | 失败 | 否 | reject | 硬编码 `DeviceConfig("cuda")`，直接落到 `torch.cuda.device_count()==0`。 |
-| 41 | `tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_loader.py` | 失败 | 有条件 | nightly | 模型源兼容问题后又暴露 `Invalid thread pool`，属于 loader + runtime 边界。 |
+| 41 | `tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_loader.py` | 失败 | 有条件 | nightly | 补齐 `runai-model-streamer[s3,gcs]` 后，当前首个稳定失败已推进为真实启动门槛：空闲显存不足。 |
 | 42 | `tests/model_executor/model_loader/runai_streamer_loader/test_runai_utils.py` | 通过 | 是 | manual | 补齐 `runai-model-streamer` 依赖后通过。 |
 | 43 | `tests/model_executor/model_loader/tensorizer_loader/test_tensorizer.py` | 不适用 | 否 | reject | 大量 `torch.cuda`/多 GPU/tensorizer 前提。 |
 | 44 | `tests/model_executor/test_enabled_custom_ops.py` | 失败 | 是 | presubmit | `CustomOp.default_on` 与 upstream 编译语义期望不一致。 |
-| 45 | `tests/models/language/generation_ppl_test/test_qwen.py` | 未跑通 | 否 | manual | PPL/eval 风格，外部数据与模型成本高。 |
-| 46 | `tests/models/language/pooling/test_all_pooling_plus_chunked_prefill.py` | 未跑通 | 是 | nightly | pooling + chunked prefill + prefix cache 属于高价值 Ascend 契约。 |
-| 47 | `tests/models/language/pooling/test_auto_prefix_cache_support.py` | 未跑通 | 是 | nightly | 自动 prefix cache 开关是重要行为契约。 |
+| 45 | `tests/models/language/generation_ppl_test/test_qwen.py` | 失败 | 否 | manual | 首个稳定失败是 `fp8 quantization is currently not supported in npu`。 |
+| 46 | `tests/models/language/pooling/test_all_pooling_plus_chunked_prefill.py` | 失败 | 是 | nightly | 已推进到输出断言层，chunked prefill/prefix cache 结果与期望不一致（`AssertionError: Test10`）。 |
+| 47 | `tests/models/language/pooling/test_auto_prefix_cache_support.py` | 失败 | 是 | nightly | 已推进到契约断言层，prefix cache 自动开关行为与预期不一致。 |
 | 48 | `tests/models/language/pooling/test_classification.py` | 未跑通 | 是 | nightly | 分类 logits/HF 对齐应在 Ascend 保持。 |
 | 49 | `tests/models/language/pooling/test_extract_hidden_states.py` | 失败 | 是 | nightly | 已推进到断言层，`num_cached_tokens` 为 `0`，属于缓存语义不一致。 |
-| 50 | `tests/models/language/pooling/test_gritlm.py` | 未跑通 | 有条件 | manual | 路径重（embedding+generate+API server），成本高。 |
-| 51 | `tests/models/language/pooling/test_nomic_max_model_len.py` | 未跑通 | 是 | nightly | `max_model_len`/rope 约束是平台无关契约。 |
+| 50 | `tests/models/language/pooling/test_gritlm.py` | 失败 | 是 | manual | 已推进到业务断言层，生成答案与期望文本严重偏离。 |
+| 51 | `tests/models/language/pooling/test_nomic_max_model_len.py` | 失败 | 有条件 | nightly | 真实根因在 ACL 图捕获/编译阶段：`torch._dynamo.exc.Unsupported`，其开发者上下文显示底层 `NotImplementedError`。 |
 | 52 | `tests/models/language/pooling/test_reward.py` | 未跑通 | 有条件 | manual | 7B 奖励模型重，对高频 CI 不友好。 |
 | 53 | `tests/models/language/pooling/test_token_classification.py` | 未跑通 | 是 | nightly | token classification 与 HF 对齐应保留。 |
-| 54 | `tests/models/language/pooling_mteb_test/test_baai.py` | 失败 | 否 | manual | 已推进到 ModelScope dataset 缺失，主要是外部评测数据源问题。 |
-| 55 | `tests/models/language/pooling_mteb_test/test_bge_reranker_v2_gemma.py` | 未跑通 | 否 | manual | MTEB + 外部依赖重，CI 收益低。 |
-| 56 | `tests/models/language/pooling_mteb_test/test_cross_encoder.py` | 未跑通 | 否 | manual | MTEB rerank 重评测。 |
-| 57 | `tests/models/language/pooling_mteb_test/test_gte.py` | 未跑通 | 否 | manual | 多模型 MTEB 评测栈成本高。 |
-| 58 | `tests/models/language/pooling_mteb_test/test_jina.py` | 未跑通 | 否 | manual | Matryoshka + rerank 组合偏重评测。 |
-| 59 | `tests/models/language/pooling_mteb_test/test_nomic.py` | 未跑通 | 否 | manual | 外部数据与模型成本高。 |
-| 60 | `tests/models/language/pooling_mteb_test/test_qwen3_reranker.py` | 未跑通 | 否 | manual | MTEB + TP2，多卡与评测栈耦合。 |
-| 61 | `tests/models/language/pooling_mteb_test/test_snowflake_arctic_embed.py` | 未跑通 | 否 | manual | 多模型 MTEB 评测成本高。 |
+| 54 | `tests/models/language/pooling_mteb_test/test_baai.py` | 失败 | 有条件 | manual | 已不是单纯数据前置：部分 case 真实失败为 `ReshapeCacheOperation`，另有 case 推进到 MTEB 断言失败。 |
+| 55 | `tests/models/language/pooling_mteb_test/test_bge_reranker_v2_gemma.py` | 失败 | 否 | manual | 已推进到 MTEB 评测栈内部：`TypeError: 'NoneType' object is not subscriptable`。 |
+| 56 | `tests/models/language/pooling_mteb_test/test_cross_encoder.py` | 失败 | 否 | manual | 已推进到 MTEB 评测栈内部：`TypeError: 'NoneType' object is not subscriptable`。 |
+| 57 | `tests/models/language/pooling_mteb_test/test_gte.py` | 失败 | 有条件 | manual | 混合失败：部分 case 为 `ReshapeCacheOperation`，另有 case 推进到 MTEB 断言失败。 |
+| 58 | `tests/models/language/pooling_mteb_test/test_jina.py` | 失败 | 是 | manual | 真实根因是 NPU 算子错误：`current working operator name is RopeOperation`。 |
+| 59 | `tests/models/language/pooling_mteb_test/test_nomic.py` | 失败 | 有条件 | manual | 真实根因在编译/ACL 图阶段：`torch._dynamo.exc.Unsupported`，底层为 `NotImplementedError`。 |
+| 60 | `tests/models/language/pooling_mteb_test/test_qwen3_reranker.py` | 失败 | 否 | manual | 已推进到 MTEB 评测栈内部：`TypeError: 'NoneType' object is not subscriptable`。 |
+| 61 | `tests/models/language/pooling_mteb_test/test_snowflake_arctic_embed.py` | 失败（前置仍阻塞） | 否 | manual | 补跑后确认当前首个阻塞是 Hugging Face `tokenizer_config.json` 获取经 SOCKS 代理长时间无响应，最终超时/`KeyboardInterrupt`。 |
 | 62 | `tests/models/multimodal/generation/test_audioflamingo3.py` | skip | 否 | reject | 日志为 `2 skipped`，未形成有效 Ascend 覆盖。 |
 | 63 | `tests/models/multimodal/generation/test_granite_speech.py` | 失败 | 是 | nightly | `NPUModelRunner` 缺少 `mm_budget`，属于多模态适配缺口。 |
 | 64 | `tests/models/multimodal/generation/test_phi4mm.py` | 失败 | 否 | reject | 多模态 LoRA 激活触发 `IndexError: tuple index out of range`，更像上游形状假设问题。 |

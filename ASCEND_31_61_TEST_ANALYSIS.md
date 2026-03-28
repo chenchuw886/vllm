@@ -49,35 +49,35 @@
 |---|---|---|---|---|---|---|---|
 | 31 | tests/kernels/moe/test_moe_permute_unpermute.py | 动态 | `torch.ops._moe_C.moe_permute_unpermute_supported` 缺失；属于 CUDA/MoE 内核扩展符号依赖 | test not applicable on Ascend platform | 否，原样价值低 | reject | 否（需 Ascend 等效 kernel UT，非原样迁移） |
 | 32 | tests/kernels/quantization/test_machete_mm.py | 动态 | collection 阶段 `current_platform.get_device_capability()[0]` 对 NPU 返回 `None` 后下标失败；测试假设 GPU capability 语义 | upstream test assumption / not Ascend-applicable | 否，原样不适配 | reject | 否（需上游测试改平台分支） |
-| 33 | tests/lora/test_add_lora.py | 静态 | ChatGLM3-6B + async 服务路径；含 “triton/cuda OOM” 语义注释，资源与后端耦合高 | heavy resource + backend-coupled | 有价值（LoRA 预热契约）但成本高 | nightly | 部分（仍需模型缓存与测试降载） |
-| 34 | tests/lora/test_chatglm3_tp.py | 静态 | `multi_gpu_test(num_gpus=4)` + TP/LoRA 语义，资源重且多卡依赖强 | heavy resource / distributed precondition | 有价值（LoRA+TP） | nightly | 部分 |
-| 35 | tests/lora/test_default_mm_loras.py | 静态 | 模块导入即 `snapshot_download("microsoft/Phi-4-multimodal-instruct")`，HF 强依赖且资源极重 | test precondition missing (heavy external model) | 价值中等（MM LoRA 路由） | manual | 主要靠测试改造（预缓存/本地化） |
+| 33 | tests/lora/test_add_lora.py | 动态 | 已越过前置条件，真实失败落在 LoRA 激活：`vllm/lora/layers/column_parallel_linear.py::set_lora` 触发 `IndexError: tuple index out of range` | vllm-ascend adaptation behavior gap | 有价值（LoRA 预热契约） | nightly | 是 |
+| 34 | tests/lora/test_chatglm3_tp.py | 动态 | 已越过多卡/模型前置，真实失败同样落在 LoRA 激活：`column_parallel_linear.py::set_lora` 触发 `IndexError: tuple index out of range` | vllm-ascend adaptation behavior gap | 有价值（LoRA+TP） | nightly | 是 |
+| 35 | tests/lora/test_default_mm_loras.py | 动态 | 并非只卡导入下载；进入运行后在多模态 LoRA 激活阶段稳定触发 `IndexError: tuple index out of range` | vllm-ascend adaptation behavior gap | 价值中等（MM LoRA 路由） | nightly | 是 |
 | 36 | tests/lora/test_gptoss_tp.py | 静态 + 历史一致 | 模型 `openai/gpt-oss-20b`，涉及 mxfp4/marlin 路径；NPU 对该量化路径历史上不支持 | runtime feature gap | 有价值但成本高 | manual | 部分（需量化支持或上游条件分支） |
-| 37 | tests/lora/test_mixtral.py | 静态 | Mixtral-8x7B + ray + TP4；多卡大模型高成本 | heavy resource / distributed | 有价值但不适合高频 | manual | 部分 |
-| 38 | tests/lora/test_olmoe_tp.py | 静态 | OLMoE 多用例（含 TP2/TP4 + fully_sharded_loras），资源与多卡前置重 | heavy resource / distributed | 有价值（LoRA 边界） | nightly | 部分 |
-| 39 | tests/lora/test_transformers_model.py | 静态 | 含 TP4 case，且在非 CUDA-like 平台不跳过，仍有多卡/模型前置成本 | test design + heavy resource | 有价值但不稳定 | nightly | 部分（测试侧需平台分层） |
+| 37 | tests/lora/test_mixtral.py | 动态 | 已推进到真实 LoRA 模块注册失败：`Module model.layers.0.block_sparse_moe.gate must be a BaseLayerWithLoRA instance, got <class 'vllm_ascend.ops.linear.AscendReplicatedLinear'>` | vllm-ascend adaptation behavior gap | 有价值但不适合高频 | nightly | 是 |
+| 38 | tests/lora/test_olmoe_tp.py | 动态 | 已推进到真实 LoRA 模块注册失败：`model.layers.0.mlp.gate` 不是 `BaseLayerWithLoRA`，而是 `AscendReplicatedLinear` | vllm-ascend adaptation behavior gap | 有价值（LoRA 边界） | nightly | 是 |
+| 39 | tests/lora/test_transformers_model.py | 动态 | 真实失败在编译/ACL 图阶段：`torch._dynamo.exc.InternalTorchDynamoError: AttributeError: 'IlamaConfig' object has no attribute 'decoder'` | compiler or runtime compatibility problem | 有价值但不稳定 | nightly | 部分（需 vllm-ascend / runtime 共同修复） |
 | 40 | tests/lora/test_worker.py | 动态 | 已绕过网络后，失败在 `DeviceConfig("cuda")` -> `gpu_worker` 中 `torch.cuda.device_count()==0` 断言 | upstream test hardcoded CUDA | 否，原样不可用 | reject | 否（需上游测试改为平台无关 worker 路径） |
-| 41 | tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_loader.py | 动态 | 在空闲卡（6/7）重跑后不再是显存门槛：`ModelScope` 路径下 `openai-community/gpt2` 缺少 `model.safetensors.index.json`；回退 HF 后又在 GCS 子例触发 `c10::Error: Invalid thread pool`（引擎子进程崩溃） | external model-source gap + runtime/torch_npu stability issue | 值得（model loader + worker 装配边界） | nightly | 部分（需模型源兼容与运行时稳定性修复） |
+| 41 | tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_loader.py | 动态 | 补齐 `runai-model-streamer[s3,gcs]` 后，当前首个稳定失败已推进到真实启动门槛：`ValueError: Free memory on device ... is less than desired GPU memory utilization` | runtime resource precondition | 值得（model loader + worker 装配边界） | nightly | 部分（需空闲卡后继续验证更深 loader 语义） |
 | 42 | tests/model_executor/model_loader/runai_streamer_loader/test_runai_utils.py | 动态 | 安装 `runai-model-streamer[s3,gcs]>=0.15.3` 后通过（`3 passed`） | test precondition missing（已消除） | 有价值一般（Run:ai 专项） | manual | 否（非代码缺陷，主要是可选依赖） |
 | 43 | tests/model_executor/model_loader/tensorizer_loader/test_tensorizer.py | 静态 | 文件大量 `torch.cuda`/多 GPU skipif/tensorizer 外部依赖；偏 CUDA/tensorizer 专项 | not Ascend-first contract | 低（原样） | reject | 否（应挑选平台无关子集重写） |
 | 44 | tests/model_executor/test_enabled_custom_ops.py | 动态 | 在 `compilation_mode=1 + backend=inductor` 期望 `CustomOp.default_on=False`，实测为 `True`（平台编译语义与 upstream 期望不一致） | vllm-ascend adaptation behavior gap | 高价值（P0 适配边界） | presubmit | 是 |
-| 45 | tests/models/language/generation_ppl_test/test_qwen.py | 静态 | PPL 基准式正确性，依赖 wikitext 与多模型（含 FP8 注释） | eval-like / external data | 中等，信噪比不高 | manual | 部分 |
-| 46 | tests/models/language/pooling/test_all_pooling_plus_chunked_prefill.py | 静态 | pooling + chunked prefill + prefix cache 的模型对齐测试，需启动真实引擎 | adaptation-boundary high value | 高价值 | nightly | 是 |
-| 47 | tests/models/language/pooling/test_auto_prefix_cache_support.py | 静态 | 分类/嵌入多模型 + prefix cache 自动开关契约，启动成本中高 | adaptation-boundary | 高价值 | nightly | 是 |
-| 48 | tests/models/language/pooling/test_classification.py | 静态 | 分类 logits 与 HF 对齐，依赖模型启动；API/数值契约明确 | behavior contract | 值得 | nightly | 是 |
+| 45 | tests/models/language/generation_ppl_test/test_qwen.py | 动态 | 首个稳定失败不是评测数据，而是 `ModelConfig` 校验：`fp8 quantization is currently not supported in npu` | runtime feature gap | 中等，信噪比不高 | manual | 否（需量化支持） |
+| 46 | tests/models/language/pooling/test_all_pooling_plus_chunked_prefill.py | 动态 | 已越过启动前置，失败推进到输出断言层：`tests/models/utils.py` 中模型输出与期望不一致（`AssertionError: Test10`） | behavior contract mismatch | 高价值 | nightly | 是 |
+| 47 | tests/models/language/pooling/test_auto_prefix_cache_support.py | 动态 | 已越过启动前置，失败推进到契约断言层：prefix cache 自动开关行为与预期不符（`assert False` / `AssertionError: Test0`） | behavior contract mismatch | 高价值 | nightly | 是 |
+| 48 | tests/models/language/pooling/test_classification.py | 动态 | 真实失败是 NPU 算子错误：`current working operator name is ReshapeCacheOperation` | vllm-ascend adaptation behavior gap | 值得 | nightly | 是 |
 | 49 | tests/models/language/pooling/test_extract_hidden_states.py | 动态 | 在空闲卡（6/7）重跑可完成引擎初始化与推理，失败推进到断言层：`assert output.num_cached_tokens > 0` 实际为 `0` | behavior contract mismatch (prefix-cache semantics) | 值得（池化隐藏态契约） | nightly | 是（需定位 Ascend 路径的 cache 统计/复用语义） |
-| 50 | tests/models/language/pooling/test_gritlm.py | 静态 | GritLM-7B，含 embedding+generate+api server，模型大且场景重 | heavy model + multi-path integration | 价值有但成本高 | manual | 部分 |
-| 51 | tests/models/language/pooling/test_nomic_max_model_len.py | 静态 | 主要验证 `max_model_len` 与 rope 配置约束；逻辑契约清晰 | behavior contract | 值得（轻于精度类） | nightly | 是 |
+| 50 | tests/models/language/pooling/test_gritlm.py | 动态 | 并非只受大模型前置影响；已推进到生成结果断言，模型输出文本与期望答案严重偏离 | behavior contract mismatch | 价值有但成本高 | manual | 是 |
+| 51 | tests/models/language/pooling/test_nomic_max_model_len.py | 动态 | 真实失败在 ACL 图捕获/编译阶段：`torch._dynamo.exc.Unsupported: Observed exception`，其开发者上下文显示底层抛出了 `NotImplementedError` | compiler or runtime compatibility problem | 值得（轻于精度类） | nightly | 部分 |
 | 52 | tests/models/language/pooling/test_reward.py | 静态 | Qwen2.5-Math-PRM-7B 奖励模型 + golden 对比，模型重 | heavy model | 有价值但成本高 | manual | 部分 |
-| 53 | tests/models/language/pooling/test_token_classification.py | 静态 | token 分类与 HF logits 对齐，包含 `torch.cuda` seed 分支但主体可平台化 | behavior contract | 值得 | nightly | 是 |
-| 54 | tests/models/language/pooling_mteb_test/test_baai.py | 动态 | 在空闲卡（6/7）重跑后可完成引擎启动，失败推进到数据集拉取：`modelscope.hub.errors.NotExistError: README.md not exist in mteb/sts12-sts` | external dataset source gap (ModelScope 对 HF dataset 代理不完整) | 价值中等（更适合夜间） | manual | 否（主要是外部数据源/测试前置问题） |
-| 55 | tests/models/language/pooling_mteb_test/test_bge_reranker_v2_gemma.py | 静态 | MTEB rerank + 自定义 HF runner，外部依赖重、运行长 | heavy eval / external | 一般 | manual | 部分 |
-| 56 | tests/models/language/pooling_mteb_test/test_cross_encoder.py | 静态 | MTEB rerank（cross-encoder + qwen reranker），依赖外部数据与模型 | heavy eval | 一般 | manual | 部分 |
-| 57 | tests/models/language/pooling_mteb_test/test_gte.py | 静态 | 多模型 embed/rerank + MTEB，外部资源与时长成本高 | heavy eval | 一般 | manual | 部分 |
-| 58 | tests/models/language/pooling_mteb_test/test_jina.py | 静态 | MTEB + matryoshka + rerank 组合，覆盖广但成本高 | heavy eval | 一般 | manual | 部分 |
-| 59 | tests/models/language/pooling_mteb_test/test_nomic.py | 静态 | MTEB embed/correctness，多模型外部依赖 | heavy eval | 一般 | manual | 部分 |
-| 60 | tests/models/language/pooling_mteb_test/test_qwen3_reranker.py | 静态 | MTEB reranker + TP2，多卡和评测栈耦合 | heavy eval/distributed | 一般 | manual | 部分 |
-| 61 | tests/models/language/pooling_mteb_test/test_snowflake_arctic_embed.py | 静态 | 多模型 MTEB + correctness，下载和运行成本高 | heavy eval | 一般 | manual | 部分 |
+| 53 | tests/models/language/pooling/test_token_classification.py | 动态 | 真实失败是 NPU 算子错误：`current working operator name is ReshapeCacheOperation` | vllm-ascend adaptation behavior gap | 值得 | nightly | 是 |
+| 54 | tests/models/language/pooling_mteb_test/test_baai.py | 动态 | 已不只是数据源问题：部分 case 真实失败为 `ReshapeCacheOperation`，另有 case 进一步推进到 `mteb_utils.py:301` 断言失败 | mixed runtime gap + eval assertion mismatch | 价值中等（更适合夜间） | manual | 部分 |
+| 55 | tests/models/language/pooling_mteb_test/test_bge_reranker_v2_gemma.py | 动态 | 已推进到 MTEB 评测栈内部：`TypeError: 'NoneType' object is not subscriptable` | external eval stack incompatibility | 一般 | manual | 否 |
+| 56 | tests/models/language/pooling_mteb_test/test_cross_encoder.py | 动态 | 已推进到 MTEB 评测栈内部：`TypeError: 'NoneType' object is not subscriptable` | external eval stack incompatibility | 一般 | manual | 否 |
+| 57 | tests/models/language/pooling_mteb_test/test_gte.py | 动态 | 混合失败：部分 case 为 `ReshapeCacheOperation`，另有 case 推进到 `mteb_utils.py:301` 断言失败 | mixed runtime gap + eval assertion mismatch | 一般 | manual | 部分 |
+| 58 | tests/models/language/pooling_mteb_test/test_jina.py | 动态 | 真实失败是 NPU 算子错误：`current working operator name is RopeOperation` | vllm-ascend adaptation behavior gap | 一般 | manual | 是 |
+| 59 | tests/models/language/pooling_mteb_test/test_nomic.py | 动态 | 真实失败在编译/ACL 图阶段：`torch._dynamo.exc.Unsupported: Observed exception`，开发者上下文显示底层 `NotImplementedError` | compiler or runtime compatibility problem | 一般 | manual | 部分 |
+| 60 | tests/models/language/pooling_mteb_test/test_qwen3_reranker.py | 动态 | 已推进到 MTEB 评测栈内部：`TypeError: 'NoneType' object is not subscriptable` | external eval stack incompatibility | 一般 | manual | 否 |
+| 61 | tests/models/language/pooling_mteb_test/test_snowflake_arctic_embed.py | 动态 | 补跑后确认当前首个阻塞是 Hugging Face `tokenizer_config.json` 获取阶段经 SOCKS 代理长时间无响应，最终被超时/`KeyboardInterrupt` 打断；尚未推进到产品代码层 | network / external resource precondition still blocking | 一般 | manual | 否（当前需要稳定镜像或预缓存后再继续） |
 
 ## 4. 文件存在性检查
 
